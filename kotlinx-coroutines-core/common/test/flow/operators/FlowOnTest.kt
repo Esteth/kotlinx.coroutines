@@ -3,7 +3,9 @@ package kotlinx.coroutines.flow
 import kotlinx.coroutines.testing.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.*
+import kotlinx.coroutines.sync.*
 import kotlinx.coroutines.testing.flow.*
+import kotlin.coroutines.*
 import kotlin.test.*
 
 class FlowOnTest : TestBase() {
@@ -353,6 +355,58 @@ class FlowOnTest : TestBase() {
                     expectUnreached()
                 }
             }
+        }
+    }
+
+    // Regression test for #4590
+    @Test
+    fun testThreadContextElementCallbacksInFastPath() {
+        val mutex1 = Mutex(locked = true)
+        val mutex2 = Mutex(locked = true)
+        val mutableState = MutableState(null)
+
+        var mutableStateValueBeforeEmit: String? = null
+        var mutableStateValueAfterEmit: String? = null
+        runBlocking {
+            launch {
+                mutex1.lock()
+                mutex2.unlock()
+            }
+
+            val flow = flow {
+                mutableStateValueBeforeEmit = mutableState.value
+                emit(1)
+                mutableStateValueAfterEmit = mutableState.value
+            }.flowOn(TestThreadContextElement("upstream", mutableState))
+
+            launch(TestThreadContextElement("downstream", mutableState)) {
+                flow.collect {
+                    mutex1.unlock()
+                    mutex2.lock()
+                }
+            }
+        }
+
+        assertEquals("upstream", mutableStateValueBeforeEmit)
+        assertEquals("upstream", mutableStateValueAfterEmit)
+    }
+
+    private class MutableState(var value: String?)
+
+    private class TestThreadContextElement(val name: String, val mutableState: MutableState) : ThreadContextElement<String?> {
+        object Key : CoroutineContext.Key<CoroutineName>
+
+        override val key: CoroutineContext.Key<CoroutineName>
+            get() = Key
+
+        override fun updateThreadContext(context: CoroutineContext): String? {
+            val oldState = mutableState.value
+            mutableState.value = name
+            return oldState
+        }
+
+        override fun restoreThreadContext(context: CoroutineContext, oldState: String?) {
+            mutableState.value = oldState
         }
     }
 }
